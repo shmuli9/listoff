@@ -7,6 +7,8 @@ const state = {
   lists: [],
   current: null,      // {id, name, members, version, data}
   pollTimer: null,
+  pending: [],        // list objects with unsaved changes, in order
+  saveFails: 0,
 };
 
 const $app = document.getElementById('app');
@@ -70,7 +72,7 @@ async function api(path, opts = {}) {
 function logout() {
   localStorage.removeItem('listoff.token');
   localStorage.removeItem('listoff.user');
-  state.user = null; state.token = null; state.current = null;
+  state.user = null; state.token = null; state.current = null; state.pending = [];
   location.hash = '#/login';
 }
 
@@ -230,26 +232,63 @@ function adoptData(cur, incoming) {
   if (incoming.name) cur.name = incoming.name;
 }
 
+function setSync(txt, isErr) {
+  const el = document.getElementById('sync');
+  if (!el) return;
+  if (!txt) { el.hidden = true; return; }
+  el.textContent = txt;
+  el.classList.toggle('err', !!isErr);
+  el.hidden = false;
+}
+let syncDelayTimer = null;
+function syncSoon() {
+  clearTimeout(syncDelayTimer);
+  syncDelayTimer = setTimeout(() => { if (state.saveInFlight) setSync('Saving\u2026'); }, 600);
+}
+
+let saveRetryTimer = null;
 function scheduleSave() {
-  if (state.saveInFlight) { state.saveAgain = true; return; }
+  const c = state.current;
+  if (!c) return;
+  if (state.saveInFlight && state.pending[0] === c) state.saveAgain = true;
+  if (!state.pending.includes(c)) state.pending.push(c);
+  pumpSave();
+}
+function pumpSave() {
+  if (state.saveInFlight || !state.pending.length) return;
   state.saveInFlight = true; state.saving = true;
+  clearTimeout(saveRetryTimer);
+  syncSoon();
   (async () => {
-    try {
-      while (true) {
+    let fail = false;
+    while (state.pending.length && !fail) {
+      const c = state.pending[0];
+      try {
         state.saveAgain = false;
-        const c = state.current;
-        if (!c) break;
         const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
-        if (state.current === c) {
-          c.version = r.version;
-          if (!state.saveAgain) adoptData(c.data, r.data); // local edits happened mid-save: keep them, loop saves again
-        }
-        if (!state.saveAgain) break;
-      }
-    } catch (e) { toast('Save failed: ' + e.message); }
-    finally { state.saveInFlight = false; state.saving = false; }
+        c.version = r.version;
+        if (state.current === c && !state.saveAgain) adoptData(c.data, r.data); // local edits mid-save: keep them, loop saves again
+        if (!state.saveAgain) state.pending.shift();
+      } catch (e) { fail = true; }
+    }
+    state.saveInFlight = false; state.saving = false;
+    clearTimeout(syncDelayTimer);
+    if (state.pending.length) {
+      state.saveFails++;
+      setSync("Couldn't save - will retry. Changes are kept on this device.", true);
+      const delay = Math.min(3000 * Math.pow(2, state.saveFails - 1), 30000);
+      saveRetryTimer = setTimeout(pumpSave, delay);
+    } else {
+      state.saveFails = 0;
+      setSync(null);
+    }
   })();
 }
+window.addEventListener('online', () => { if (state.pending.length) pumpSave(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.pending.length) pumpSave(); });
+window.addEventListener('beforeunload', (e) => {
+  if (state.pending.length || state.saveInFlight) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function logAction(action, itemName) {
   state.current.data.log.push({ id: uid('e'), ts: Date.now(), user: state.user, action, itemName });
@@ -458,6 +497,10 @@ function bindListTab(id) {
       e.preventDefault();
       try { grip.setPointerCapture(e.pointerId); } catch {}
       const rows = [...$app.querySelectorAll('.item')];
+      const catOf = {};
+      state.current.data.items.forEach((x) => { catOf[x.id] = x.category || ''; });
+      const oldIdx = state.current.data.items.indexOf(it);
+      const oldCat = it.category || '';
       let target = null, before = true;
       const move = (ev) => {
         target = null;
@@ -466,14 +509,31 @@ function bindListTab(id) {
           const rect = r.getBoundingClientRect();
           if (ev.clientY >= rect.top && ev.clientY <= rect.bottom) { target = r; before = ev.clientY < rect.top + rect.height / 2; break; }
         }
-        rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
-        if (target) target.classList.add(before ? 'drop-before' : 'drop-after');
+        rows.forEach((r) => {
+          r.classList.remove('drop-before', 'drop-after');
+          const h = r.querySelector('.drop-hint');
+          if (h) h.remove();
+        });
+        if (target) {
+          target.classList.add(before ? 'drop-before' : 'drop-after');
+          const tc = catOf[target.dataset.id] || '';
+          if (tc !== oldCat) {
+            const s = document.createElement('span');
+            s.className = 'drop-hint';
+            s.textContent = '\u2192 ' + (tc || 'Other');
+            target.appendChild(s);
+          }
+        }
       };
       const up = () => {
         grip.removeEventListener('pointermove', move);
         grip.removeEventListener('pointerup', up);
         grip.removeEventListener('pointercancel', up);
-        rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+        rows.forEach((r) => {
+          r.classList.remove('drop-before', 'drop-after');
+          const h = r.querySelector('.drop-hint');
+          if (h) h.remove();
+        });
         if (!target) return;
         const items = state.current.data.items;
         const cur = items.find((x) => x.id === it.id);
@@ -482,12 +542,29 @@ function bindListTab(id) {
         items.splice(items.indexOf(cur), 1);
         let toIdx = items.indexOf(tgt);
         if (!before) toIdx++;
-        if ((tgt.category || '') !== (cur.category || '')) cur.category = tgt.category || '';
+        const newCat = tgt.category || '';
+        const recats = newCat !== (cur.category || '');
+        if (recats) cur.category = newCat;
         items.splice(toIdx, 0, cur);
         cur.updatedAt = Date.now();
         logAction('reordered', cur.name);
         drawList(id, '');
         scheduleSave();
+        if (recats) {
+          const did = cur.id, nm = cur.name;
+          toast('Moved ' + nm + ' to ' + (newCat || 'Other'), () => {
+            const items2 = state.current && state.current.data.items;
+            const c2 = items2 && items2.find((x) => x.id === did);
+            if (!c2) return;
+            items2.splice(items2.indexOf(c2), 1);
+            c2.category = oldCat;
+            c2.updatedAt = Date.now();
+            items2.splice(Math.min(oldIdx, items2.length), 0, c2);
+            logAction('reordered', c2.name);
+            drawList(id, '');
+            scheduleSave();
+          });
+        }
       };
       grip.addEventListener('pointermove', move);
       grip.addEventListener('pointerup', up);

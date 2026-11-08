@@ -141,3 +141,8 @@ button.primary:disabled { opacity: 0.5; }
 .item.editing { display: block; }
 .editform input { margin-bottom: 8px; }
 .item .name[role="button"] { cursor: pointer; }
+
+/* save sync pill + drag hint */
+#sync { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 7px 16px; border-radius: 18px; font-size: 13px; z-index: 70; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+#sync.err { background: #b3261e; }
+.drop-hint { color: var(--green); font-size: 12px; font-weight: 700; align-self: center; margin-left: auto; margin-right: 10px; white-space: nowrap; }
