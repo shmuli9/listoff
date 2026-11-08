@@ -1,5 +1,6 @@
 import { api, ApiError, deriveProof, newSalt, setExpiredHandler, setToken } from './api';
 import { categorize } from './categories';
+import { dedupeKey } from './parse';
 import { mergeLists } from '../../worker/merge.js';
 import { toast } from './ui.svelte';
 import type { Doc, Item, ListData, ListMeta } from './types';
@@ -237,9 +238,9 @@ class Store {
   private log(d: ListData, action: string, itemName = '') {
     d.log.push({ id: uid('e'), ts: Date.now(), user: this.user!, action, itemName });
   }
-  private shelf(d: ListData, name: string, category: string) {
+  private shelf(d: ListData, name: string, category: string, times = 1) {
     const key = name.toLowerCase(), prev = d.shelf[key];
-    d.shelf[key] = { ...prev, name: prev?.name ?? name, category, lastAt: Date.now(), count: (prev?.count ?? 0) + 1 };
+    d.shelf[key] = { ...prev, name: prev?.name ?? name, category, lastAt: Date.now(), count: (prev?.count ?? 0) + times };
   }
   categoryFor(id: string, name: string) {
     return this.docs[id]?.data.shelf[name.toLowerCase()]?.category || categorize(name); // remembers manual corrections
@@ -253,7 +254,8 @@ class Store {
     if (!d0) return;
     const name = e.name.trim();
     if (!name) return;
-    const existing = d0.items.find((i) => !i.deleted && i.name.toLowerCase() === name.toLowerCase());
+    const wanted = dedupeKey(name);
+    const existing = d0.items.find((i) => !i.deleted && dedupeKey(i.name) === wanted);
     if (existing && !existing.done) {
       if (e.qty && e.qty !== existing.qty) this.updateItem(id, existing.id, { qty: e.qty });
       toast(`${existing.name} is already on the list`);
@@ -325,17 +327,19 @@ class Store {
     });
     if (recat) toast(`Moved ${it.name} to ${category}`, () => this.restore(id, [before], 'moved back'));
   }
-  importRows(id: string, rows: { name: string; qty: string; note: string; category: string }[]) {
+  // Checked rows are things bought before: they feed history and type-ahead, not the list.
+  importRows(id: string, rows: { name: string; qty: string; note: string; category: string; checked?: boolean; count?: number }[]) {
     const d0 = this.docs[id]?.data;
     if (!d0) return 0;
-    const on = new Set(d0.items.filter((i) => !i.deleted && !i.done).map((i) => i.name.toLowerCase()));
+    const on = new Set(d0.items.filter((i) => !i.deleted && !i.done).map((i) => dedupeKey(i.name)));
+    const known = new Map(Object.values(d0.shelf).map((s) => [dedupeKey(s.name), s.name]));
     let added = 0;
     this.mutate(id, (d) => {
       const now = Date.now();
-      for (const r of rows) {
-        this.shelf(d, r.name, r.category);
-        const k = r.name.toLowerCase();
-        if (on.has(k)) continue;
+      for (const { checked, count, ...r } of rows) {
+        const k = dedupeKey(r.name);
+        this.shelf(d, known.get(k) ?? r.name, r.category, count ?? 1); // "Avocados" joins an existing "Avocado"
+        if (checked || on.has(k)) continue;
         on.add(k);
         d.items.push({ ...r, id: uid('i'), done: false, addedBy: this.user!, addedAt: now, updatedAt: now, pos: now + added++ });
       }

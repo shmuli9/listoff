@@ -179,7 +179,7 @@ test('favourites, activity, import, rename', async ({ page }) => {
   await page.getByRole('link', { name: 'Activity' }).click();
   await expect(page.locator('.log').first()).toContainText('added Oats');
   await page.getByRole('link', { name: 'Manage' }).click();
-  await page.getByLabel(/Paste text/).fill('Baking:\n- xanthan gum\n2 x flour');
+  await page.getByLabel(/Paste an AnyList/).fill('Baking:\n- xanthan gum\n2 x flour');
   await page.getByRole('button', { name: 'Import 2 items' }).click();
   await expect(page.getByRole('checkbox', { name: 'xanthan gum' })).toBeVisible();
   await page.getByRole('link', { name: 'Manage' }).click();

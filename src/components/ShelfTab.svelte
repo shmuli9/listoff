@@ -10,12 +10,14 @@
   const on = $derived(new Set(doc.data.items.filter((i) => !i.deleted && !i.done).map((i) => i.name.toLowerCase())));
   const entries = $derived(Object.entries(doc.data.shelf)
     .filter(([, s]) => s.name.toLowerCase().includes(q.trim().toLowerCase()))
-    .sort(([, a], [, b]) => (Number(b.fav ?? 0) - Number(a.fav ?? 0)) || (b.lastAt - a.lastAt)));
+    .sort(([, a], [, b]) => (Number(b.fav ?? 0) - Number(a.fav ?? 0)) || (b.lastAt - a.lastAt) || (b.count - a.count)));
+  const LIMIT = 100; // imported histories run to 1,000+; search reaches the rest
+  const visible = $derived(entries.slice(0, LIMIT));
 </script>
 
 <input class="search" bind:value={q} type="search" placeholder="Search favourites and recent items" aria-label="Search">
 
-{#each entries as [key, s] (key)}
+{#each visible as [key, s] (key)}
   {@const isOn = on.has(s.name.toLowerCase())}
   <div class="shelf-row">
     <button class="star" class:on={s.fav} aria-pressed={!!s.fav} aria-label={`Favourite ${s.name}`} onclick={() => store.toggleFav(id, key)}>
@@ -33,3 +35,6 @@
 {:else}
   <p class="empty">{q ? 'No matches.' : 'Items you add show up here for quick re-adding.'}</p>
 {/each}
+{#if entries.length > LIMIT}
+  <p class="empty">Showing your top {LIMIT} of {entries.length.toLocaleString()}. Search to find the rest.</p>
+{/if}
