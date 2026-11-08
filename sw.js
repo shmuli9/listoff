@@ -1,5 +1,5 @@
 // App-shell cache only. API responses (list data) are never cached: permissions and logout must take effect immediately.
-const CACHE = 'listoff-shell-v8';
+const CACHE = 'listoff-shell-v9';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 self.addEventListener('install', (e) => {
