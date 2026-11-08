@@ -436,7 +436,7 @@ function bindListTab(id) {
     const grip = row.querySelector('.grip');
     grip.addEventListener('pointerdown', (e) => {
       e.preventDefault();
-      grip.setPointerCapture(e.pointerId);
+      try { grip.setPointerCapture(e.pointerId); } catch {}
       const rows = [...$app.querySelectorAll('.item')];
       let target = null, before = true;
       const move = (ev) => {

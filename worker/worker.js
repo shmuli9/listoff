@@ -147,7 +147,7 @@ async function readEncryptedGist(env, gistId, fileName) {
 async function writeEncryptedGist(env, gistId, fileName, plain) {
   const content = await encryptText(plain, env);
   const gist = await gistRequest(env, 'PATCH', '/' + gistId, { files: { [fileName]: { content } } });
-  return gist.history && gist.history[0] ? gist.history[0].version : null;
+  return { version: gist.history && gist.history[0] ? gist.history[0].version : null, history: gist.history || [] };
 }
 
 async function createEncryptedGist(env, fileName, plain, description) {
@@ -324,11 +324,16 @@ async function route(request, env, url) {
       let base = body.baseVersion;
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
-          const newVersion = await writeEncryptedGist(env, entry.gistId, LIST_FILE, JSON.stringify(data));
+          const wr = await writeEncryptedGist(env, entry.gistId, LIST_FILE, JSON.stringify(data));
+          const newVersion = wr.version;
           // Gist has no conditional write, so verify no commit landed between our read and write:
           // after our commit, history must be [ours, theVersionWeBasedOn, ...].
-          const gist = await gistRequest(env, 'GET', '/' + entry.gistId);
-          const hist = gist.history || [];
+          // The PATCH response already includes history; fall back to a GET if absent.
+          let hist = wr.history;
+          if (!hist.length) {
+            const gist = await gistRequest(env, 'GET', '/' + entry.gistId);
+            hist = gist.history || [];
+          }
           const headVersion = hist[0] ? hist[0].version : null;
           const prevVersion = hist[1] ? hist[1].version : null;
           if (headVersion === newVersion && prevVersion === base) {
