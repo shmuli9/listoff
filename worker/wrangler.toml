@@ -1,0 +1,8 @@
+name = "listoff-api"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+workers_dev = true
+
+[vars]
+ALLOWED_ORIGINS = "https://shmuli9.github.io"
+PBKDF2_ITERS = "100000"
