@@ -285,7 +285,12 @@ async function bindMembersTab(id) {
     box.className = '';
     box.innerHTML = '<p>Who can see and edit this list:</p>' +
       r.users.map((u) => '<label style="display:block;margin-bottom:8px"><input type="checkbox" class="memBox" value="' + esc(u) + '"' + (cur.includes(u) ? ' checked' : '') + '> ' + esc(u) + '</label>').join('') +
-      '<button class="primary" id="saveMembers">Save members</button>';
+      '<button class="primary" id="saveMembers">Save members</button>' +
+      '<hr style="margin:18px 0"><button id="deleteList" style="color:#b00">Delete this list</button>';
+    document.getElementById('deleteList').onclick = async () => {
+      if (!confirm('Delete this list for everyone? This cannot be undone.')) return;
+      try { await api('/api/list/' + id + '/delete', { method: 'POST', body: {} }); location.hash = '#/'; } catch (e) { toast(e.message); }
+    };
     document.getElementById('saveMembers').onclick = async () => {
       const members = [...document.querySelectorAll('.memBox:checked')].map((c) => c.value);
       if (!members.length) { toast('A list needs at least one member'); return; }

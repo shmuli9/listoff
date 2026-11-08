@@ -303,7 +303,7 @@ async function route(request, env, url) {
     return json({ error: 'busy, try again' }, 409);
   }
 
-  const listMatch = path.match(/^\/api\/list\/([A-Za-z0-9]+)(\/members|\/rename)?$/);
+  const listMatch = path.match(/^\/api\/list\/([A-Za-z0-9]+)(\/members|\/rename|\/delete)?$/);
   if (listMatch) {
     const listId = listMatch[1];
     const sub = listMatch[2] || '';
@@ -356,6 +356,12 @@ async function route(request, env, url) {
       entry.name = String(body.name).slice(0, 80);
       await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
       return json({ ok: true, name: entry.name });
+    }
+
+    if (sub === '/delete' && method === 'POST') {
+      system.lists = system.lists.filter((l) => l.id !== listId);
+      await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
+      return json({ ok: true });
     }
 
     if (sub === '/members' && method === 'POST') {
