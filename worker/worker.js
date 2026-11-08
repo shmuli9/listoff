@@ -173,12 +173,12 @@ async function authenticatedUser(request, env) {
   const auth = request.headers.get('Authorization') || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   const payload = await verifyToken(token, env.SESSION_SECRET);
-  if (!payload) return null;
+  if (!payload) return { user: null, system: null };
   // Token version check: changing a password bumps the user's tv, revoking all older tokens.
   const { system } = await readSystem(env);
   const rec = system.users[payload.u];
-  if (!rec || (rec.tv || 0) !== (payload.tv || 0)) return null;
-  return payload.u;
+  if (!rec || (rec.tv || 0) !== (payload.tv || 0)) return { user: null, system };
+  return { user: payload.u, system };
 }
 
 // ---------- list merge (item-level, last-writer-wins per item) ----------
@@ -253,20 +253,20 @@ async function route(request, env, url) {
   }
 
   if (path === '/api/users' && method === 'GET') {
-    const user = await authenticatedUser(request, env);
-    if (!user) return json({ error: 'unauthorized' }, 401);
-    const { system } = await readSystem(env);
-    return json({ users: Object.keys(system.users).sort() });
+    const authd = await authenticatedUser(request, env);
+    if (!authd.user) return json({ error: 'unauthorized' }, 401);
+    return json({ users: Object.keys(authd.system.users).sort() });
   }
 
   // Everything below requires auth.
-  const user = await authenticatedUser(request, env);
+  const authd = await authenticatedUser(request, env);
+  const user = authd.user;
   if (!user) return json({ error: 'unauthorized' }, 401);
 
   if (path === '/api/change-password' && method === 'POST') {
     const body = await request.json().catch(() => null);
     if (!body || !body.oldProof || !body.newSalt || !body.newProof) return json({ error: 'oldProof, newSalt and newProof required' }, 400);
-    const { system } = await readSystem(env);
+    const system = authd.system;
     const rec = system.users[user];
     if (!rec) return json({ error: 'unknown user' }, 400);
     const oldHash = await proofHash(String(body.oldProof), env.PEPPER);
@@ -278,8 +278,7 @@ async function route(request, env, url) {
   }
 
   if (path === '/api/lists' && method === 'GET') {
-    const { system } = await readSystem(env);
-    const lists = system.lists
+    const lists = authd.system.lists
       .filter((l) => l.members.includes(user))
       .map((l) => ({ id: l.id, name: l.name, members: l.members }));
     return json({ lists });
@@ -307,7 +306,7 @@ async function route(request, env, url) {
   if (listMatch) {
     const listId = listMatch[1];
     const sub = listMatch[2] || '';
-    const { system } = await readSystem(env);
+    const system = authd.system;
     const entry = system.lists.find((l) => l.id === listId);
     if (!entry) return json({ error: 'not found' }, 404);
     if (!entry.members.includes(user)) return json({ error: 'forbidden' }, 403);
@@ -322,26 +321,27 @@ async function route(request, env, url) {
       if (!body || !body.data) return json({ error: 'data required' }, 400);
       let data = body.data;
       let lastErr = null;
+      let base = body.baseVersion;
       for (let attempt = 0; attempt < 4; attempt++) {
         try {
-          const read = await readEncryptedGist(env, entry.gistId, LIST_FILE);
-          const current = JSON.parse(read.plain);
-          if (body.baseVersion !== read.version) data = mergeLists(current, data);
           const newVersion = await writeEncryptedGist(env, entry.gistId, LIST_FILE, JSON.stringify(data));
           // Gist has no conditional write, so verify no commit landed between our read and write:
-          // after our commit, history must be [ours, theVersionWeRead, ...].
+          // after our commit, history must be [ours, theVersionWeBasedOn, ...].
           const gist = await gistRequest(env, 'GET', '/' + entry.gistId);
           const hist = gist.history || [];
           const headVersion = hist[0] ? hist[0].version : null;
           const prevVersion = hist[1] ? hist[1].version : null;
-          if (headVersion === newVersion && prevVersion === read.version) {
+          if (headVersion === newVersion && prevVersion === base) {
             return json({ version: newVersion, data });
           }
-          // A writer intervened or followed: merge the newest state with ours and retry.
-          const file = gist.files && gist.files[LIST_FILE];
+          // Our base was stale or a writer intervened: fetch the version we overwrote,
+          // merge it into ours (item-level LWW) and retry. Our own commit V(n) already
+          // contains the merge, so the next attempt bases on it.
+          const prev = await gistRequest(env, 'GET', '/' + entry.gistId + '/' + prevVersion);
+          const file = prev.files && prev.files[LIST_FILE];
           const content = file.truncated ? await (await fetch(file.raw_url)).text() : file.content;
           data = mergeLists(JSON.parse(await decryptText(content.trim(), env)), data);
-          body.baseVersion = headVersion;
+          base = newVersion;
         } catch (e) {
           lastErr = e;
         }

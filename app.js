@@ -213,13 +213,25 @@ async function fetchList(id) {
   return r;
 }
 
-async function saveCurrent() {
-  const c = state.current;
-  state.saving = true;
-  try {
-    const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
-    c.version = r.version; c.data = r.data;
-  } finally { state.saving = false; }
+function scheduleSave() {
+  if (state.saveInFlight) { state.saveAgain = true; return; }
+  state.saveInFlight = true; state.saving = true;
+  (async () => {
+    try {
+      while (true) {
+        state.saveAgain = false;
+        const c = state.current;
+        if (!c) break;
+        const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
+        if (state.current === c) {
+          c.version = r.version;
+          if (!state.saveAgain) c.data = r.data; // local edits happened mid-save: keep them, loop saves again
+        }
+        if (!state.saveAgain) break;
+      }
+    } catch (e) { toast('Save failed: ' + e.message); }
+    finally { state.saveInFlight = false; state.saving = false; }
+  })();
 }
 
 function logAction(action, itemName) {
@@ -307,8 +319,9 @@ async function bindMembersTab(id) {
 function itemHtml(it) {
   const sub = [it.qty, it.note].filter(Boolean).map(esc).join(' &middot; ');
   return '<div class="item' + (it.done ? ' done' : '') + '" data-id="' + it.id + '">' +
+    '<span class="grip" aria-label="drag to reorder" title="Drag to reorder">&#8801;</span>' +
     '<button class="tick' + (it.done ? ' on' : '') + '" aria-label="tick">' + (it.done ? '&#10003;' : '') + '</button>' +
-    '<div class="body"><div class="name">' + esc(it.name) + '</div>' +
+    '<div class="body"><div class="name" role="button">' + esc(it.name) + '</div>' +
     (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>' +
     '<button class="del" aria-label="delete">&times;</button></div>';
 }
@@ -354,7 +367,7 @@ function bindListTab(id) {
     logAction('added', name);
     input.value = ''; qty.value = ''; note.value = ''; sugg.hidden = true;
     drawList(id, ''); $app.querySelector('input[name=item]').focus();
-    try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+    scheduleSave();
   }
 
   document.getElementById('addBtn').onclick = () => addItem();
@@ -388,15 +401,77 @@ function bindListTab(id) {
         const cur = state.current && state.current.data.items.find((x) => x.id === itemId);
         if (!cur) return;
         cur.done = false; cur.updatedAt = Date.now(); logAction('unticked', cur.name);
-        drawList(id, ''); try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+        drawList(id, ''); scheduleSave();
       });
-      try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+      scheduleSave();
     };
     row.querySelector('.del').onclick = async () => {
       it.deleted = true; it.updatedAt = Date.now(); logAction('removed', it.name);
       drawList(id, '');
-      try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+      scheduleSave();
     };
+    row.querySelector('.name').onclick = () => {
+      const cats = [...new Set(state.current.data.items.filter((x) => !x.deleted && x.category).map((x) => x.category))];
+      row.classList.add('editing');
+      row.innerHTML = '<div class="editform">' +
+        '<input class="eName" value="' + esc(it.name) + '" placeholder="Item">' +
+        '<div class="extras"><input class="eQty" placeholder="Qty" value="' + esc(it.qty || '') + '"><input class="eNote" placeholder="Note" value="' + esc(it.note || '') + '"></div>' +
+        '<input class="eCat" placeholder="Category (e.g. Produce)" list="catList" value="' + esc(it.category || '') + '">' +
+        '<datalist id="catList">' + cats.map((c) => '<option value="' + esc(c) + '">').join('') + '</datalist>' +
+        '<div class="row" style="gap:8px"><button class="primary eSave" style="margin:0">Save</button><button class="eCancel">Cancel</button></div></div>';
+      row.querySelector('.eSave').onclick = () => {
+        const name = row.querySelector('.eName').value.trim();
+        if (!name) return;
+        it.name = name;
+        it.qty = row.querySelector('.eQty').value.trim();
+        it.note = row.querySelector('.eNote').value.trim();
+        it.category = row.querySelector('.eCat').value.trim();
+        it.updatedAt = Date.now();
+        logAction('edited', it.name);
+        drawList(id, '');
+        scheduleSave();
+      };
+      row.querySelector('.eCancel').onclick = () => drawList(id, '');
+    };
+    const grip = row.querySelector('.grip');
+    grip.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      grip.setPointerCapture(e.pointerId);
+      const rows = [...$app.querySelectorAll('.item')];
+      let target = null, before = true;
+      const move = (ev) => {
+        target = null;
+        for (const r of rows) {
+          if (r === row || r.classList.contains('editing')) continue;
+          const rect = r.getBoundingClientRect();
+          if (ev.clientY >= rect.top && ev.clientY <= rect.bottom) { target = r; before = ev.clientY < rect.top + rect.height / 2; break; }
+        }
+        rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+        if (target) target.classList.add(before ? 'drop-before' : 'drop-after');
+      };
+      const up = () => {
+        grip.removeEventListener('pointermove', move);
+        grip.removeEventListener('pointerup', up);
+        grip.removeEventListener('pointercancel', up);
+        rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+        if (!target) return;
+        const items = state.current.data.items;
+        const tgt = items.find((x) => x.id === target.dataset.id);
+        if (!tgt || tgt === it) return;
+        items.splice(items.indexOf(it), 1);
+        let toIdx = items.indexOf(tgt);
+        if (!before) toIdx++;
+        if ((tgt.category || '') !== (it.category || '')) it.category = tgt.category || '';
+        items.splice(toIdx, 0, it);
+        it.updatedAt = Date.now();
+        logAction('reordered', it.name);
+        drawList(id, '');
+        scheduleSave();
+      };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+      grip.addEventListener('pointercancel', up);
+    });
   });
 
   const clearBtn = document.getElementById('clearDone');
@@ -404,7 +479,7 @@ function bindListTab(id) {
     for (const it of doneItems()) { it.deleted = true; it.updatedAt = Date.now(); }
     logAction('cleared done items', '');
     drawList(id, '');
-    try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+    scheduleSave();
   };
 }
 
@@ -437,7 +512,7 @@ function drawShelfItems(filter) {
         addedBy: state.user, addedAt: Date.now(), updatedAt: Date.now() });
       shelfAdd(name, cat); logAction('added', name);
       drawList(c.id, '/shelf');
-      try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+      scheduleSave();
       toast('Added ' + name);
     };
   });
@@ -503,7 +578,7 @@ function bindImportTab(id) {
       added++;
     }
     logAction('imported ' + added + ' items', '');
-    try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
+    scheduleSave();
     document.getElementById('importMsg').textContent = added + ' items imported (' + (parsedImport.length - added) + ' already on the list).';
     importBtn.disabled = true;
   };
