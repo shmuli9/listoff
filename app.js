@@ -36,6 +36,22 @@ function uid(prefix) {
   return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+function hexToBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+function bytesToHex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+// Password stretching happens client-side (OWASP-baseline PBKDF2-HMAC-SHA256);
+// the worker only ever sees the derived proof, never the password.
+async function deriveProof(password, saltHex, iters) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: hexToBytes(saltHex), iterations: iters, hash: 'SHA-256' }, km, 256);
+  return bytesToHex(new Uint8Array(bits));
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(API + path, {
     method: opts.method || 'GET',
@@ -117,7 +133,9 @@ function renderLogin() {
     err.textContent = '';
     const btn = e.target.querySelector('button'); btn.disabled = true;
     try {
-      const r = await api('/api/login', { method: 'POST', body: { u: u.value.trim(), p: p.value } });
+      const params = await api('/api/login-params', { method: 'POST', body: { u: u.value.trim() } });
+      const proof = await deriveProof(p.value, params.salt, params.iters);
+      const r = await api('/api/login', { method: 'POST', body: { u: u.value.trim(), proof } });
       state.token = r.token; state.user = r.user; saveLocal();
       location.hash = '#/';
     } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
@@ -164,7 +182,11 @@ function renderAccount() {
     e.preventDefault();
     pwErr.textContent = ''; pwOk.textContent = '';
     try {
-      await api('/api/change-password', { method: 'POST', body: { old: cur.value, next: nxt.value } });
+      const params = await api('/api/login-params', { method: 'POST', body: { u: state.user } });
+      const oldProof = await deriveProof(cur.value, params.salt, params.iters);
+      const newSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      const newProof = await deriveProof(nxt.value, newSalt, 600000);
+      await api('/api/change-password', { method: 'POST', body: { oldProof, newSalt, newProof } });
       pwOk.textContent = 'Password changed.'; cur.value = ''; nxt.value = '';
     } catch (ex) { pwErr.textContent = ex.message; }
   };

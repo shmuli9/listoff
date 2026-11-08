@@ -80,16 +80,12 @@ async function verifyToken(token, secret) {
   return payload;
 }
 
-async function passwordHash(password, saltHex, iters, pepper) {
-  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: bytesFromHex(saltHex), iterations: iters, hash: 'SHA-256' },
-    keyMaterial,
-    256
-  );
-  // Server-side pepper: HMAC over the PBKDF2 output, so the stored hash is useless without the Worker secret.
+async function proofHash(proofHex, pepper) {
+  // The client sends proof = hex(PBKDF2-HMAC-SHA256(password, salt, iters)).
+  // Stored value = HMAC-SHA256(pepper, proof): the gist contents alone cannot be brute-forced,
+  // and the worker never sees or handles the actual password.
   const key = await hmacKey(pepper);
-  const sig = await crypto.subtle.sign('HMAC', key, bits);
+  const sig = await crypto.subtle.sign('HMAC', key, bytesFromHex(proofHex));
   return hexFromBytes(new Uint8Array(sig));
 }
 
@@ -217,29 +213,25 @@ async function route(request, env, url) {
 
   if (path === '/api/health') return json({ ok: true, service: 'listoff-api' });
 
-  // Temporary, disabled unless DEBUG_KEY secret is set. Used to measure PBKDF2 cost on the free CPU budget.
-  if (path === '/api/hashbench') {
-    if (!env.DEBUG_KEY || request.headers.get('X-Debug-Key') !== env.DEBUG_KEY) return json({ error: 'not found' }, 404);
-    const iters = parseInt(url.searchParams.get('iters') || '100000', 10);
-    const reps = Math.min(parseInt(url.searchParams.get('reps') || '3', 10), 5);
-    if (iters < 1000 || iters > 1000000) return json({ error: 'bad iters' }, 400);
-    const salt = hexFromBytes(crypto.getRandomValues(new Uint8Array(16)));
-    const times = [];
-    for (let i = 0; i < reps; i++) {
-      const t0 = Date.now();
-      await passwordHash('benchmark-password', salt, iters, env.DEBUG_KEY);
-      times.push(Date.now() - t0);
-    }
-    return json({ iters, times });
+  if (path === '/api/login-params' && method === 'POST') {
+    const body = await request.json().catch(() => null);
+    const u = body && body.u ? String(body.u) : '';
+    const { system } = await readSystem(env);
+    const rec = system.users[u];
+    if (rec) return json({ salt: rec.salt, iters: rec.iters });
+    // Unknown user: return a deterministic fake salt so the endpoint doesn't reveal which usernames exist.
+    const key = await hmacKey(env.PEPPER);
+    const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode('salt:' + u));
+    return json({ salt: hexFromBytes(new Uint8Array(sig)).slice(0, 32), iters: parseInt(env.PBKDF2_ITERS || '600000', 10) });
   }
 
   if (path === '/api/login' && method === 'POST') {
     const body = await request.json().catch(() => null);
-    if (!body || !body.u || !body.p) return json({ error: 'username and password required' }, 400);
+    if (!body || !body.u || !body.proof) return json({ error: 'username and proof required' }, 400);
     const { system } = await readSystem(env);
     const rec = system.users[body.u];
     if (!rec) return json({ error: 'invalid credentials' }, 401);
-    const hash = await passwordHash(body.p, rec.salt, rec.iters, env.PEPPER);
+    const hash = await proofHash(String(body.proof), env.PEPPER);
     if (hash !== rec.hash) return json({ error: 'invalid credentials' }, 401);
     const token = await signToken({ u: body.u, exp: Date.now() + 30 * 24 * 3600 * 1000 }, env.SESSION_SECRET);
     return json({ token, user: body.u });
@@ -251,21 +243,16 @@ async function route(request, env, url) {
 
   if (path === '/api/change-password' && method === 'POST') {
     const body = await request.json().catch(() => null);
-    if (!body || !body.old || !body.next) return json({ error: 'old and next required' }, 400);
-    if (String(body.next).length < 8) return json({ error: 'password must be at least 8 characters' }, 400);
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const { system } = await readSystem(env);
-      const rec = system.users[user];
-      if (!rec) return json({ error: 'unknown user' }, 400);
-      const oldHash = await passwordHash(body.old, rec.salt, rec.iters, env.PEPPER);
-      if (oldHash !== rec.hash) return json({ error: 'current password incorrect' }, 403);
-      const salt = hexFromBytes(crypto.getRandomValues(new Uint8Array(16)));
-      const iters = parseInt(env.PBKDF2_ITERS || '210000', 10);
-      system.users[user] = { salt, iters, hash: await passwordHash(body.next, salt, iters, env.PEPPER) };
-      await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
-      return json({ ok: true });
-    }
-    return json({ error: 'busy, try again' }, 409);
+    if (!body || !body.oldProof || !body.newSalt || !body.newProof) return json({ error: 'oldProof, newSalt and newProof required' }, 400);
+    const { system } = await readSystem(env);
+    const rec = system.users[user];
+    if (!rec) return json({ error: 'unknown user' }, 400);
+    const oldHash = await proofHash(String(body.oldProof), env.PEPPER);
+    if (oldHash !== rec.hash) return json({ error: 'current password incorrect' }, 403);
+    const iters = parseInt(env.PBKDF2_ITERS || '600000', 10);
+    system.users[user] = { salt: String(body.newSalt), iters, hash: await proofHash(String(body.newProof), env.PEPPER) };
+    await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
+    return json({ ok: true });
   }
 
   if (path === '/api/lists' && method === 'GET') {
