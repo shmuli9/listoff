@@ -1,6 +1,7 @@
 // listoff-api - Cloudflare Worker backend for listoff
 // Responsibilities: auth (PBKDF2 + pepper), per-list authorisation, gist storage, AES-GCM encryption at rest.
-// No dependencies.
+
+import { compactList, mergeLists } from './merge.js';
 
 const GISTS_API = 'https://api.github.com/gists';
 
@@ -9,7 +10,7 @@ const GISTS_API = 'https://api.github.com/gists';
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
   });
 }
 
@@ -80,6 +81,15 @@ async function verifyToken(token, secret) {
   return payload;
 }
 
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+const isHex = (s, len) => typeof s === 'string' && s.length === len && /^[0-9a-f]+$/i.test(s);
+
 async function proofHash(proofHex, pepper) {
   // The client sends proof = hex(PBKDF2-HMAC-SHA256(password, salt, iters)).
   // Stored value = HMAC-SHA256(pepper, proof): the gist contents alone cannot be brute-forced,
@@ -129,7 +139,7 @@ async function gistRequest(env, method, path, body) {
     const text = await res.text();
     throw new Error('gist ' + method + ' ' + path + ' -> ' + res.status + ': ' + text.slice(0, 200));
   }
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
 const SYSTEM_FILE = 'system.json.enc';
@@ -181,35 +191,6 @@ async function authenticatedUser(request, env) {
   return { user: payload.u, system };
 }
 
-// ---------- list merge (item-level, last-writer-wins per item) ----------
-
-function mergeLists(current, incoming) {
-  const items = new Map();
-  for (const it of current.items || []) items.set(it.id, it);
-  for (const it of incoming.items || []) {
-    const prev = items.get(it.id);
-    if (!prev || (it.updatedAt || 0) >= (prev.updatedAt || 0)) items.set(it.id, it);
-  }
-  const shelf = { ...(current.shelf || {}) };
-  for (const [k, v] of Object.entries(incoming.shelf || {})) {
-    const prev = shelf[k];
-    if (!prev) shelf[k] = v;
-    else shelf[k] = {
-      name: (v.lastAt || 0) >= (prev.lastAt || 0) ? v.name : prev.name,
-      category: (v.lastAt || 0) >= (prev.lastAt || 0) ? v.category : prev.category,
-      lastAt: Math.max(v.lastAt || 0, prev.lastAt || 0),
-      count: Math.max(v.count || 0, prev.count || 0),
-    };
-  }
-  const logMap = new Map();
-  for (const e of [...(current.log || []), ...(incoming.log || [])]) logMap.set(e.id, e);
-  const log = [...logMap.values()].sort((a, b) => a.ts - b.ts).slice(-500);
-  // purge tombstones older than 7 days
-  const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
-  const mergedItems = [...items.values()].filter((it) => !(it.deleted && (it.updatedAt || 0) < cutoff));
-  return { name: incoming.name || current.name, items: mergedItems, shelf, log };
-}
-
 // ---------- routes ----------
 
 async function route(request, env, url) {
@@ -234,16 +215,17 @@ async function route(request, env, url) {
     const body = await request.json().catch(() => null);
     if (!body || !body.u || !body.proof) return json({ error: 'username and proof required' }, 400);
     const { system } = await readSystem(env);
-    const u = String(body.u);
+    const u = String(body.u).slice(0, 64);
     const now = Date.now();
-    system.loginFails = system.loginFails || {};
+    // Unknown usernames are tracked too (so lockouts don't reveal who exists); stale entries are pruned so the record can't grow without bound.
+    system.loginFails = Object.fromEntries(Object.entries(system.loginFails || {}).filter(([, v]) => v.lockedUntil > now || now - (v.at || 0) < 3600 * 1000));
     const f = system.loginFails[u];
     if (f && f.lockedUntil && f.lockedUntil > now) return json({ error: 'too many attempts, try again in a few minutes' }, 429);
     const rec = system.users[u];
-    const ok = rec && (await proofHash(String(body.proof), env.PEPPER)) === rec.hash;
+    const ok = rec && isHex(body.proof, 64) && safeEqual(await proofHash(body.proof, env.PEPPER), rec.hash);
     if (!ok) {
       const n = ((f && f.n) || 0) + 1;
-      system.loginFails[u] = { n, lockedUntil: n >= 5 ? now + 5 * 60 * 1000 : 0 };
+      system.loginFails[u] = { n, at: now, lockedUntil: n >= 5 ? now + 5 * 60 * 1000 : 0 };
       await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
       return json({ error: 'invalid credentials' }, 401);
     }
@@ -269,8 +251,9 @@ async function route(request, env, url) {
     const system = authd.system;
     const rec = system.users[user];
     if (!rec) return json({ error: 'unknown user' }, 400);
-    const oldHash = await proofHash(String(body.oldProof), env.PEPPER);
-    if (oldHash !== rec.hash) return json({ error: 'current password incorrect' }, 403);
+    if (!isHex(body.oldProof, 64) || !isHex(body.newProof, 64) || !isHex(body.newSalt, 32)) return json({ error: 'malformed proof' }, 400);
+    const oldHash = await proofHash(body.oldProof, env.PEPPER);
+    if (!safeEqual(oldHash, rec.hash)) return json({ error: 'current password incorrect' }, 403);
     const iters = parseInt(env.PBKDF2_ITERS || '600000', 10);
     system.users[user] = { salt: String(body.newSalt), iters, hash: await proofHash(String(body.newProof), env.PEPPER), tv: (rec.tv || 0) + 1 };
     await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
@@ -318,8 +301,9 @@ async function route(request, env, url) {
 
     if (sub === '' && method === 'PUT') {
       const body = await request.json().catch(() => null);
-      if (!body || !body.data) return json({ error: 'data required' }, 400);
-      let data = body.data;
+      if (!body || !body.data || !Array.isArray(body.data.items)) return json({ error: 'data required' }, 400);
+      let data = compactList(body.data);
+      if (JSON.stringify(data).length > 2_000_000) return json({ error: 'list too large' }, 413);
       let lastErr = null;
       let base = body.baseVersion;
       for (let attempt = 0; attempt < 4; attempt++) {
@@ -366,6 +350,7 @@ async function route(request, env, url) {
     if (sub === '/delete' && method === 'POST') {
       system.lists = system.lists.filter((l) => l.id !== listId);
       await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
+      await gistRequest(env, 'DELETE', '/' + entry.gistId).catch(() => {}); // registry is authoritative; an orphan is only leftover ciphertext
       return json({ ok: true });
     }
 
@@ -389,7 +374,7 @@ function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Debug-Key',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Access-Control-Max-Age': '86400',
   };
 }
