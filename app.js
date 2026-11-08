@@ -201,8 +201,11 @@ async function fetchList(id) {
 
 async function saveCurrent() {
   const c = state.current;
-  const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
-  c.version = r.version; c.data = r.data;
+  state.saving = true;
+  try {
+    const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
+    c.version = r.version; c.data = r.data;
+  } finally { state.saving = false; }
 }
 
 function logAction(action, itemName) {
@@ -228,9 +231,10 @@ async function renderList(id, tab) {
   drawList(id, tab);
   // light polling for shared edits
   state.pollTimer = setInterval(async () => {
-    if (!state.current || state.current.id !== id) return;
+    if (!state.current || state.current.id !== id || state.saving) return;
     try {
       const r = await api('/api/list/' + id);
+      if (state.saving) return;
       if (r.version !== state.current.version) { state.current = r; drawList(id, tab, true); }
     } catch (e) { /* offline - keep showing local state */ }
   }, 15000);
