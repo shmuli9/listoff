@@ -336,7 +336,9 @@ function bindListTab(id) {
       logAction(it.done ? 'ticked' : 'unticked', it.name);
       drawList(id, '');
       if (it.done) toast('Ticked ' + it.name, async () => {
-        it.done = false; it.updatedAt = Date.now(); logAction('unticked', it.name);
+        const cur = state.current && state.current.data.items.find((x) => x.id === itemId);
+        if (!cur) return;
+        cur.done = false; cur.updatedAt = Date.now(); logAction('unticked', cur.name);
         drawList(id, ''); try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
       });
       try { await saveCurrent(); } catch (e) { toast('Save failed: ' + e.message); }
