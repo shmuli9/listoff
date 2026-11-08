@@ -113,7 +113,7 @@ function render() {
   const hash = location.hash || '#/';
   if (!state.token) { renderLogin(); return; }
   if (hash === '#/' || hash === '') return renderLists();
-  let m = hash.match(/^#\/list\/([A-Za-z0-9]+)(\/shelf|\/activity|\/import)?$/);
+  let m = hash.match(/^#\/list\/([A-Za-z0-9]+)(\/shelf|\/activity|\/import|\/members)?$/);
   if (m) return renderList(m[1], m[2] || '');
   if (hash === '#/account') return renderAccount();
   renderLists();
@@ -151,6 +151,7 @@ async function renderLists() {
   state.lists = lists;
   let html = topbar('listoff', '<a href="#/account">&#9881;</a>') + '<div class="content">';
   html += '<button class="primary" id="newListBtn" style="margin:4px 0 16px">+ New list</button>';
+  html += '<div id="newListForm" hidden style="margin-bottom:16px"><input id="newListName" placeholder="List name" style="margin-bottom:8px"><div id="newListMembers" style="margin-bottom:8px"></div><button class="primary" id="createListBtn">Create list</button></div>';
   if (!lists.length) html += '<div class="empty">No lists yet. Create one to get started.</div>';
   for (const l of lists) {
     html += '<a class="list-card" href="#/list/' + l.id + '"><div><div class="name">' + esc(l.name) + '</div>' +
@@ -158,10 +159,23 @@ async function renderLists() {
   }
   html += '<div class="footer-note">Signed in as ' + esc(state.user) + '</div></div>';
   $app.innerHTML = html;
-  document.getElementById('newListBtn').onclick = () => {
-    const name = prompt('List name?');
+  document.getElementById('newListBtn').onclick = async () => {
+    const form = document.getElementById('newListForm');
+    form.hidden = !form.hidden;
+    if (!form.hidden && !form.dataset.loaded) {
+      try {
+        const r = await api('/api/users');
+        document.getElementById('newListMembers').innerHTML = 'Share with: ' + r.users.filter((u) => u !== state.user)
+          .map((u) => '<label style="margin-right:12px"><input type="checkbox" class="nlMember" value="' + esc(u) + '"> ' + esc(u) + '</label>').join('');
+        form.dataset.loaded = '1';
+      } catch (e) { toast(e.message); }
+    }
+  };
+  document.getElementById('createListBtn').onclick = () => {
+    const name = document.getElementById('newListName').value.trim();
     if (!name) return;
-    api('/api/lists', { method: 'POST', body: { name, members: [] } })
+    const members = [...document.querySelectorAll('.nlMember:checked')].map((c) => c.value);
+    api('/api/lists', { method: 'POST', body: { name, members } })
       .then((r) => { location.hash = '#/list/' + r.id; })
       .catch((e) => toast(e.message));
   };
@@ -246,17 +260,42 @@ function drawList(id, tab, keepFocus) {
     '<a href="#/list/' + id + '" class="' + (tab === '' ? 'active' : '') + '">List</a>' +
     '<a href="#/list/' + id + '/shelf" class="' + (tab === '/shelf' ? 'active' : '') + '">Previously added</a>' +
     '<a href="#/list/' + id + '/activity" class="' + (tab === '/activity' ? 'active' : '') + '">Activity</a>' +
-    '<a href="#/list/' + id + '/import" class="' + (tab === '/import' ? 'active' : '') + '">Import</a></div>';
+    '<a href="#/list/' + id + '/import" class="' + (tab === '/import' ? 'active' : '') + '">Import</a>' +
+    '<a href="#/list/' + id + '/members" class="' + (tab === '/members' ? 'active' : '') + '">Members</a></div>';
   let html = topbar(c.name, '', '#/') + tabs + '<div class="content">';
   if (tab === '') html += listTabHtml(c);
   else if (tab === '/shelf') html += shelfTabHtml(c);
   else if (tab === '/activity') html += activityTabHtml(c);
   else if (tab === '/import') html += importTabHtml(c);
+  else if (tab === '/members') html += '<div id="memberEditor" class="empty">Loading members\u2026</div>';
   html += '</div>';
   $app.innerHTML = html;
   if (tab === '') bindListTab(id);
   else if (tab === '/shelf') bindShelfTab(id);
   else if (tab === '/import') bindImportTab(id);
+  else if (tab === '/members') bindMembersTab(id);
+}
+
+// ---------- members tab ----------
+async function bindMembersTab(id) {
+  const box = document.getElementById('memberEditor');
+  try {
+    const r = await api('/api/users');
+    const cur = state.current.members || [];
+    box.className = '';
+    box.innerHTML = '<p>Who can see and edit this list:</p>' +
+      r.users.map((u) => '<label style="display:block;margin-bottom:8px"><input type="checkbox" class="memBox" value="' + esc(u) + '"' + (cur.includes(u) ? ' checked' : '') + '> ' + esc(u) + '</label>').join('') +
+      '<button class="primary" id="saveMembers">Save members</button>';
+    document.getElementById('saveMembers').onclick = async () => {
+      const members = [...document.querySelectorAll('.memBox:checked')].map((c) => c.value);
+      if (!members.length) { toast('A list needs at least one member'); return; }
+      try {
+        const r2 = await api('/api/list/' + id + '/members', { method: 'POST', body: { members } });
+        state.current.members = r2.members;
+        toast('Members updated');
+      } catch (e) { toast(e.message); }
+    };
+  } catch (e) { box.textContent = e.message; }
 }
 
 function itemHtml(it) {

@@ -173,7 +173,12 @@ async function authenticatedUser(request, env) {
   const auth = request.headers.get('Authorization') || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   const payload = await verifyToken(token, env.SESSION_SECRET);
-  return payload ? payload.u : null;
+  if (!payload) return null;
+  // Token version check: changing a password bumps the user's tv, revoking all older tokens.
+  const { system } = await readSystem(env);
+  const rec = system.users[payload.u];
+  if (!rec || (rec.tv || 0) !== (payload.tv || 0)) return null;
+  return payload.u;
 }
 
 // ---------- list merge (item-level, last-writer-wins per item) ----------
@@ -243,8 +248,15 @@ async function route(request, env, url) {
       return json({ error: 'invalid credentials' }, 401);
     }
     if (f && f.n) { delete system.loginFails[u]; await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system)); }
-    const token = await signToken({ u, exp: now + 30 * 24 * 3600 * 1000 }, env.SESSION_SECRET);
+    const token = await signToken({ u, tv: rec.tv || 0, exp: now + 30 * 24 * 3600 * 1000 }, env.SESSION_SECRET);
     return json({ token, user: u });
+  }
+
+  if (path === '/api/users' && method === 'GET') {
+    const user = await authenticatedUser(request, env);
+    if (!user) return json({ error: 'unauthorized' }, 401);
+    const { system } = await readSystem(env);
+    return json({ users: Object.keys(system.users).sort() });
   }
 
   // Everything below requires auth.
@@ -260,7 +272,7 @@ async function route(request, env, url) {
     const oldHash = await proofHash(String(body.oldProof), env.PEPPER);
     if (oldHash !== rec.hash) return json({ error: 'current password incorrect' }, 403);
     const iters = parseInt(env.PBKDF2_ITERS || '600000', 10);
-    system.users[user] = { salt: String(body.newSalt), iters, hash: await proofHash(String(body.newProof), env.PEPPER) };
+    system.users[user] = { salt: String(body.newSalt), iters, hash: await proofHash(String(body.newProof), env.PEPPER), tv: (rec.tv || 0) + 1 };
     await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
     return json({ ok: true });
   }
