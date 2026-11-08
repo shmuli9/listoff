@@ -281,6 +281,10 @@ function listTabHtml(c) {
   for (const cat of CATEGORY_ORDER) {
     if (!groups[cat]) continue;
     html += '<div class="category"><h3>' + esc(cat) + '</h3>' + groups[cat].map(itemHtml).join('') + '</div>';
+    delete groups[cat];
+  }
+  for (const cat of Object.keys(groups).sort()) {
+    html += '<div class="category"><h3>' + esc(cat) + '</h3>' + groups[cat].map(itemHtml).join('') + '</div>';
   }
   if (done.length) {
     html += '<div class="category"><h3>Done (' + done.length + ')</h3>' + done.map(itemHtml).join('') + '</div>';
