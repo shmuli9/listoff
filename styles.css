@@ -42,6 +42,8 @@ input, textarea, select {
   background: #fff; color: var(--text); font-family: inherit;
 }
 input:focus, textarea:focus { outline: 2px solid var(--green); outline-offset: -1px; border-color: transparent; }
+input[type="checkbox"] { width: auto; padding: 0; margin: 0 8px 0 0; vertical-align: middle; }
+label:has(> input[type="checkbox"]) { display: flex; align-items: center; margin-bottom: 10px; }
 button.primary {
   width: 100%; margin-top: 20px; padding: 13px; background: var(--green); color: #fff; border: none;
   border-radius: 10px; font-size: 16px; font-weight: 650; cursor: pointer;
