@@ -275,7 +275,7 @@ function pumpSave() {
     clearTimeout(syncDelayTimer);
     if (state.pending.length) {
       state.saveFails++;
-      setSync("Couldn't save - will retry. Changes are kept on this device.", true);
+      setSync("Not saved yet. Keep this page open - retrying.", true);
       const delay = Math.min(3000 * Math.pow(2, state.saveFails - 1), 30000);
       saveRetryTimer = setTimeout(pumpSave, delay);
     } else {
