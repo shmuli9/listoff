@@ -229,12 +229,22 @@ async function route(request, env, url) {
     const body = await request.json().catch(() => null);
     if (!body || !body.u || !body.proof) return json({ error: 'username and proof required' }, 400);
     const { system } = await readSystem(env);
-    const rec = system.users[body.u];
-    if (!rec) return json({ error: 'invalid credentials' }, 401);
-    const hash = await proofHash(String(body.proof), env.PEPPER);
-    if (hash !== rec.hash) return json({ error: 'invalid credentials' }, 401);
-    const token = await signToken({ u: body.u, exp: Date.now() + 30 * 24 * 3600 * 1000 }, env.SESSION_SECRET);
-    return json({ token, user: body.u });
+    const u = String(body.u);
+    const now = Date.now();
+    system.loginFails = system.loginFails || {};
+    const f = system.loginFails[u];
+    if (f && f.lockedUntil && f.lockedUntil > now) return json({ error: 'too many attempts, try again in a few minutes' }, 429);
+    const rec = system.users[u];
+    const ok = rec && (await proofHash(String(body.proof), env.PEPPER)) === rec.hash;
+    if (!ok) {
+      const n = ((f && f.n) || 0) + 1;
+      system.loginFails[u] = { n, lockedUntil: n >= 5 ? now + 5 * 60 * 1000 : 0 };
+      await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system));
+      return json({ error: 'invalid credentials' }, 401);
+    }
+    if (f && f.n) { delete system.loginFails[u]; await writeEncryptedGist(env, env.SYSTEM_GIST_ID, SYSTEM_FILE, JSON.stringify(system)); }
+    const token = await signToken({ u, exp: now + 30 * 24 * 3600 * 1000 }, env.SESSION_SECRET);
+    return json({ token, user: u });
   }
 
   // Everything below requires auth.

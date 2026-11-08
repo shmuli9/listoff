@@ -463,6 +463,16 @@ function bindImportTab(id) {
 // ---------- boot ----------
 window.addEventListener('hashchange', render);
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    setInterval(() => reg.update(), 60 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update(); });
+  }).catch(() => {});
+  // Reload once when an updated service worker takes control, so bug/security fixes
+  // reach open tabs without any manual cache clearing.
+  let hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) { hadController = true; return; }
+    location.reload();
+  });
 }
 render();
