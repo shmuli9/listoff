@@ -17,9 +17,13 @@
   const attempt = async (f: () => Promise<unknown>, ok: string) => {
     try { await f(); toast(ok); } catch (e: any) { toast(e.status === 0 ? 'This needs a connection' : e.message); }
   };
+  const toBuy = $derived(rows.filter((r) => !r.checked));
+  const history = $derived(rows.filter((r) => r.checked).length);
+  const plural = (n: number) => `${n.toLocaleString()} item${n === 1 ? '' : 's'}`;
+
   function doImport() {
     const added = store.importRows(id, rows);
-    toast(`Imported ${added} item${added === 1 ? '' : 's'}`);
+    toast(`Imported ${plural(added)}${history ? `, ${history.toLocaleString()} in Favourites` : ''}`);
     text = '';
     go('#/list/' + id);
   }
@@ -51,11 +55,14 @@
 
 <section>
   <h3 class="cat-head">Import</h3>
-  <label for="imp">Paste text, one item per line. A line ending in ":" becomes a category.</label>
+  <label for="imp">Paste an AnyList export, or any text with one item per line. A line ending in ":" becomes a category.</label>
   <textarea id="imp" rows="6" bind:value={text} placeholder={'Milk\n2 x bread\nCleaning:\nBleach'}></textarea>
   {#if rows.length}
-    <p class="muted">{rows.length} item{rows.length === 1 ? '' : 's'}: {rows.slice(0, 6).map((r) => r.name).join(', ')}{rows.length > 6 ? '…' : ''}</p>
-    <button class="primary" onclick={doImport}>Import {rows.length} item{rows.length === 1 ? '' : 's'}</button>
+    <p class="muted">
+      {#if toBuy.length}{plural(toBuy.length)} to buy: {toBuy.slice(0, 6).map((r) => r.name).join(', ')}{toBuy.length > 6 ? '…' : ''}{/if}
+      {#if history}<br>{plural(history)} already ticked off will go in Favourites, ready to re-add.{/if}
+    </p>
+    <button class="primary" onclick={doImport}>Import {toBuy.length ? plural(toBuy.length) : `${history.toLocaleString()} to Favourites`}</button>
   {/if}
 </section>
 
