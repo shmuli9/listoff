@@ -213,6 +213,23 @@ async function fetchList(id) {
   return r;
 }
 
+// Adopt server data without breaking object identity: rows rendered before a save
+// completes hold closures over the existing item objects, so mutate in place.
+function adoptData(cur, incoming) {
+  const existing = {};
+  cur.items.forEach((oi) => { existing[oi.id] = oi; });
+  const merged = incoming.items.map((ni) => {
+    const oi = existing[ni.id];
+    if (oi) { Object.assign(oi, ni); return oi; }
+    return ni;
+  });
+  cur.items.length = 0;
+  merged.forEach((m) => cur.items.push(m));
+  cur.log = incoming.log;
+  cur.shelf = incoming.shelf;
+  if (incoming.name) cur.name = incoming.name;
+}
+
 function scheduleSave() {
   if (state.saveInFlight) { state.saveAgain = true; return; }
   state.saveInFlight = true; state.saving = true;
@@ -225,7 +242,7 @@ function scheduleSave() {
         const r = await api('/api/list/' + c.id, { method: 'PUT', body: { baseVersion: c.version, data: c.data } });
         if (state.current === c) {
           c.version = r.version;
-          if (!state.saveAgain) c.data = r.data; // local edits happened mid-save: keep them, loop saves again
+          if (!state.saveAgain) adoptData(c.data, r.data); // local edits happened mid-save: keep them, loop saves again
         }
         if (!state.saveAgain) break;
       }
@@ -261,7 +278,10 @@ async function renderList(id, tab) {
     try {
       const r = await api('/api/list/' + id);
       if (state.saving) return;
-      if (r.version !== state.current.version) { state.current = r; drawList(id, tab, true); }
+      if (r.version !== state.current.version) {
+        if (document.querySelector('.editform')) return; // don't wipe an open editor
+        state.current = r; drawList(id, tab, true);
+      }
     } catch (e) { /* offline - keep showing local state */ }
   }, 15000);
 }
@@ -456,15 +476,16 @@ function bindListTab(id) {
         rows.forEach((r) => r.classList.remove('drop-before', 'drop-after'));
         if (!target) return;
         const items = state.current.data.items;
+        const cur = items.find((x) => x.id === it.id);
         const tgt = items.find((x) => x.id === target.dataset.id);
-        if (!tgt || tgt === it) return;
-        items.splice(items.indexOf(it), 1);
+        if (!cur || !tgt || tgt === cur) return;
+        items.splice(items.indexOf(cur), 1);
         let toIdx = items.indexOf(tgt);
         if (!before) toIdx++;
-        if ((tgt.category || '') !== (it.category || '')) it.category = tgt.category || '';
-        items.splice(toIdx, 0, it);
-        it.updatedAt = Date.now();
-        logAction('reordered', it.name);
+        if ((tgt.category || '') !== (cur.category || '')) cur.category = tgt.category || '';
+        items.splice(toIdx, 0, cur);
+        cur.updatedAt = Date.now();
+        logAction('reordered', cur.name);
         drawList(id, '');
         scheduleSave();
       };
